@@ -1,0 +1,45 @@
+# systemd unit: runs the bridge with plain Node.js (no Docker) on Linux,
+# e.g. a Raspberry Pi with a 64-bit OS or the machine running Roon Server.
+#
+#   1. Edit WorkingDirectory, ReadWritePaths, User and the settings below.
+#   2. sudo cp roon-inkplate.service /etc/systemd/system/
+#   3. sudo systemctl daemon-reload && sudo systemctl enable --now roon-inkplate
+#   Logs: journalctl -u roon-inkplate -f
+#   Check the sandboxing: systemd-analyze security roon-inkplate
+
+[Unit]
+Description=Roon Inkplate now-playing bridge
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# Must be the bridge folder: the Roon pairing token is kept in config.json here.
+WorkingDirectory=/opt/roon-inkplate/bridge
+ExecStart=/usr/bin/node bridge.js
+User=pi
+Restart=always
+RestartSec=5
+
+# Any setting from compose.yaml can go here. Without ROON_HOST, discovery is used.
+Environment=ZONE_NAME=
+Environment=FRONTLIGHT=20
+# Environment=CONTROL_TOKEN=<output of: openssl rand -hex 16>
+
+# Sandboxing. The bridge only needs to write to its own folder.
+# If node is installed under a home directory (nvm), remove ProtectHome.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/roon-inkplate/bridge
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+CapabilityBoundingSet=
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

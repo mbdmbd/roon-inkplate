@@ -1,0 +1,11 @@
+# Weekly pull requests for dependency and base-image updates.
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /bridge
+    schedule:
+      interval: weekly
+  - package-ecosystem: docker
+    directory: /bridge
+    schedule:
+      interval: weekly

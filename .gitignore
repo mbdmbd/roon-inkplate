@@ -1,0 +1,18 @@
+# Node
+node_modules/
+
+# Runtime state written by the bridge: config.json holds the Roon pairing token
+bridge/config.json
+bridge/display-settings.json
+bridge/bridge.log
+bridge/preview.png
+bridge/frame.bin
+
+# Firmware secrets: copy config.example.h to config.h
+firmware/RoonInkplate/config.h
+
+# OS / editor clutter
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

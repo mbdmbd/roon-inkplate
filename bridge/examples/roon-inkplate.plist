@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  macOS LaunchAgent: runs the bridge with plain Node.js (no Docker) at login.
+
+  1. Replace /path/to/roon-inkplate/bridge (three places) with the real path,
+     and /opt/homebrew/bin/node with the output of `which node`.
+  2. cp roon-inkplate.plist ~/Library/LaunchAgents/
+  3. launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/roon-inkplate.plist
+
+  After editing settings:
+    launchctl bootout gui/$(id -u)/roon-inkplate
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/roon-inkplate.plist
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>roon-inkplate</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/opt/homebrew/bin/node</string>
+        <string>bridge.js</string>
+    </array>
+
+    <!-- Must be the bridge folder: the Roon pairing token is kept in config.json here. -->
+    <key>WorkingDirectory</key>
+    <string>/path/to/roon-inkplate/bridge</string>
+
+    <!-- Any setting from compose.yaml can go here. Without ROON_HOST, discovery is used. -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>ZONE_NAME</key>
+        <string></string>
+        <key>FRONTLIGHT</key>
+        <string>20</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/path/to/roon-inkplate/bridge/bridge.log</string>
+    <key>StandardErrorPath</key>
+    <string>/path/to/roon-inkplate/bridge/bridge.log</string>
+</dict>
+</plist>

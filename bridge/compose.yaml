@@ -1,0 +1,70 @@
+# Roon -> Inkplate bridge.
+#   First run / after updating the code:  docker compose up -d --build
+#   After changing a setting below:       docker compose up -d
+#
+# Every setting the bridge reads is listed here with its default value.
+
+services:
+  roon-inkplate:
+    build: .
+    image: roon-inkplate-bridge
+    container_name: roon-inkplate
+    restart: unless-stopped
+    # Hardening: no Linux capabilities, no privilege escalation, and a read-only
+    # root filesystem. The bridge only writes to /data (volume) and /tmp.
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp
+    ports:
+      - "8765:8765"            # host:container. If you change PORT, change the right-hand side to match.
+                               # To listen on one network only, prefix the host IP: "192.168.1.10:8765:8765".
+    extra_hosts:
+      - "host.docker.internal:host-gateway"   # lets Linux hosts use host.docker.internal too
+    volumes:
+      - roon-inkplate-data:/data       # Roon pairing (config.json) and touch-adjusted light (display-settings.json)
+      # Optional: use your own fonts, then set FONT to the family name, e.g. on macOS:
+      # - ~/Library/Fonts:/usr/share/fonts/user:ro
+    environment:
+      # ---- Roon connection ----------------------------------------------------
+      # Roon's automatic discovery uses UDP multicast, which doesn't pass through
+      # Docker's default networking, so the bridge connects to the core directly.
+      ROON_HOST: host.docker.internal   # Roon core on this machine; otherwise the core's LAN IP
+      ROON_PORT: "9330"                 # Roon's extension port; it can move within 9330-9339
+      CONNECT_TIMEOUT_SEC: "20"         # give up on a silent connection attempt and retry after this long
+
+      # ---- What to show -------------------------------------------------------
+      ZONE_NAME: ""                     # exact zone name from /status; empty = whichever zone is playing
+      IDLE_GRACE_SEC: "120"             # seconds paused/stopped before the panel goes idle
+      IDLE_MODE: blank                  # blank = white panel when idle; keep = last cover stays, unlit
+
+      # ---- Layout and image ---------------------------------------------------
+      LAYOUT: portrait                  # portrait = art above text; landscape = art left, text right
+      ROTATE: "90"                      # portrait only: 90 or 270, whichever is upright for you (touch follows it)
+      GAMMA: "1.0"                      # >1 lightens midtones for e-ink; try 1.2-1.6 if covers look muddy
+      SHOW_TEXT: "1"                    # 0 hides the track / artist / album text
+      FONT: "DejaVu Sans"               # any font installed in the container (see the fonts volume above)
+
+      # ---- Frontlight ---------------------------------------------------------
+      FRONTLIGHT: "20"                  # starting level while playing, 0-63. Changing it resets touch adjustments.
+      LIGHT_STEP: "5"                   # change per swipe up/down in the text strip
+
+      # ---- Volume (swipes on the album art) -----------------------------------
+      VOLUME_STEP: "5"                  # change per swipe, in the zone's units (usually dB)
+      VOLUME_MAX: "-30"                 # swipe-up never raises the volume above this (zone's units).
+                                        # For zones that use a 0-100 scale, set something like "50".
+
+      # ---- Security -----------------------------------------------------------
+      CONTROL_TOKEN: ""                 # optional shared secret for /control; set the same value in the
+                                        # Inkplate's config.h. Generate one with: openssl rand -hex 16
+      ALLOWED_HOSTS: ""                 # extra host names allowed in requests, comma-separated (e.g. "bridge.lan").
+                                        # IP addresses, localhost and *.local names are always allowed.
+
+      # ---- Misc ---------------------------------------------------------------
+      PORT: "8765"                      # HTTP port inside the container (keep in step with ports: above)
+
+volumes:
+  roon-inkplate-data:
