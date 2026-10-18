@@ -1,6 +1,6 @@
 {
   "name": "roon-inkplate-bridge",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "Roon extension that shows now-playing album art on an Inkplate 6PLUS e-paper display",
   "license": "MIT",
   "private": true,

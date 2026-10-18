@@ -441,10 +441,20 @@ if (ROON_HOST) {
     };
     log(`connecting to Roon core at ${ROON_HOST}:${ROON_PORT}`);
     const moo = roon.ws_connect({ host: ROON_HOST, port: ROON_PORT, onclose: retry, onerror: retry });
+    // Note any message from the core. Once it has answered, the connection is
+    // alive even if pairing takes a while: Roon holds the registration open
+    // until someone clicks Enable in Settings > Extensions, and dropping it then
+    // would make the extension vanish from that list.
+    let heardFromCore = false;
+    const onmessage = moo.transport.onmessage;
+    moo.transport.onmessage = (msg) => {
+      heardFromCore = true;
+      onmessage(msg);
+    };
     // A core that is still starting up can accept the connection and then never
     // answer, which produces neither a close nor an error. Abandon and retry.
     watchdog = setTimeout(() => {
-      if (corePaired) return;
+      if (corePaired || heardFromCore) return;
       log('no answer from Roon core, retrying');
       retry();
       try { moo.transport.close(); } catch (e) { /* already gone */ }

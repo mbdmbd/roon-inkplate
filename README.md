@@ -61,7 +61,7 @@ In Roon, open **Settings → Extensions** and **Enable** "Inkplate Now Playing".
 
 Then check it from a browser:
 
-- `http://<bridge-ip>:8765/status` lists your zones and their states. Copy your zone's exact name into `ZONE_NAME` in `compose.yaml` and run `docker compose up -d`.
+- `http://<bridge-ip>:8765/status` lists your zones and their states. Put your zone's exact name in `ZONE_NAME` (see [Configuration](#configuration)) and run `docker compose up -d`.
 - `http://<bridge-ip>:8765/preview.png` shows what the panel will display, upright.
 
 ### 2. Flash the Inkplate
@@ -100,6 +100,16 @@ Swipes made while the panel is downloading and redrawing a new cover (a couple o
 ## Configuration
 
 Every setting is an environment variable. All of them are listed, with defaults and comments, in [`bridge/compose.yaml`](bridge/compose.yaml). After changing one, run `docker compose up -d`; you don't need `--build`. Settings are checked at startup: if one is invalid, the bridge exits and the log says which and why.
+
+Rather than editing `compose.yaml`, put your own values in `bridge/compose.override.yaml`. Docker Compose merges it automatically, and it's ignored by git, so `git pull` never conflicts with your settings:
+
+```yaml
+services:
+  roon-inkplate:
+    environment:
+      ZONE_NAME: "Living Room"
+      FRONTLIGHT: "15"
+```
 
 | Variable | Default | Meaning |
 |---|---|---|

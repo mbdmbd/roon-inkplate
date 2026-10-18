@@ -8,6 +8,9 @@ bridge/bridge.log
 bridge/preview.png
 bridge/frame.bin
 
+# Your own settings: put them in bridge/compose.override.yaml (merged automatically)
+bridge/compose.override.yaml
+
 # Firmware secrets: copy config.example.h to config.h
 firmware/RoonInkplate/config.h
 
