@@ -9,14 +9,14 @@
 #   docker buildx imagetools inspect node:24-trixie-slim   -> node:24-trixie-slim@sha256:...
 
 # ---- dependencies --------------------------------------------------------------
-FROM node:24-trixie-slim AS deps
+FROM node:26-trixie-slim AS deps
 WORKDIR /app
 COPY package.json package-lock.json ./
 # The Roon API packages come from GitHub; npm fetches them as tarballs, no git needed.
 RUN npm ci --omit=dev --no-audit --no-fund
 
 # ---- runtime -----------------------------------------------------------------------
-FROM node:24-trixie-slim
+FROM node:26-trixie-slim
 
 # sharp renders the track text through fontconfig, so the image needs real fonts
 # (-extra adds the true italic used for the album line).
