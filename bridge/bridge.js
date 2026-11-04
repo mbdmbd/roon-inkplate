@@ -9,9 +9,11 @@
  *
  *   GET  /frame        1024x758 frame, 4 bits/pixel (levels 0-7, 0 = black),
  *                      high nibble = left pixel. Headers: ETag, X-Frontlight (0-63),
- *                      X-Layout, X-Rotate (so the Inkplate can map touches)
+ *                      X-Layout, X-Rotate (so the Inkplate can map touches),
+ *                      X-Screen and, when shown, X-Stations-Button (x,y,w,h)
  *   POST /control?action=playpause|next|previous|vol_up|vol_down|
- *                        light_toggle|light_up|light_down
+ *                        light_toggle|light_up|light_down|stations
+ *   POST /control?action=select&x=..&y=..  (stations screen; If-Match: frame ETag)
  *   GET  /preview.png  what the panel should show, upright, for tuning
  *   GET  /status       JSON debug info
  *
@@ -22,6 +24,7 @@
  *
  * Test the rendering without Roon or the Inkplate:
  *   node bridge.js --test cover.jpg "Track" "Artist" "Album"   -> preview.png
+ *   node bridge.js --test-stations "Station" "Other=logo.png"  -> preview.png
  */
 
 const http = require('http');
@@ -63,7 +66,8 @@ const CFG = {
   lightStep: num('LIGHT_STEP', 5, { min: 1, max: 63, int: true }),  // frontlight change per swipe in the text area
   volumeStep: num('VOLUME_STEP', 5, { min: 0.1, max: 20 }),        // volume change per swipe (zone's units, usually dB)
   volumeMax: num('VOLUME_MAX', -30, { min: -200, max: 200 }),       // swipe-up never goes above this (zone's units)
-  idleMode: oneOf('IDLE_MODE', 'blank', ['blank', 'keep']),         // white screen, or last cover unlit
+  idleMode: oneOf('IDLE_MODE', 'blank', ['blank', 'keep', 'stations']), // white, last cover unlit, or station buttons
+  stationsTimeoutSec: num('STATIONS_TIMEOUT_SEC', 20, { min: 5, max: 600 }), // station screen opened from the arrow
   layout: oneOf('LAYOUT', 'portrait', ['portrait', 'landscape']),   // art above text, or art left
   rotate: Number(oneOf('ROTATE', '90', ['90', '270'])),             // portrait only: whichever is upright for you
   gamma: num('GAMMA', 1.0, { min: 0.2, max: 5 }),                   // >1 lightens midtones, <1 darkens
@@ -76,6 +80,18 @@ const CFG = {
   controlTokenSet: false, // filled in below; the token itself is never shown
 };
 
+// Stations pinned to the first tiles of the stations screen, exactly as Roon
+// names them in My Live Radio, separated by |. The remaining tiles show the
+// most recently played stations.
+const MAX_STATIONS = 6;
+CFG.radioStations = env('RADIO_STATIONS', '').split('|').map((t) => t.trim()).filter(Boolean);
+if (CFG.radioStations.length > MAX_STATIONS) configErrors.push(`RADIO_STATIONS lists ${CFG.radioStations.length} stations; at most ${MAX_STATIONS} fit`);
+for (const t of CFG.radioStations) {
+  if (t.length > 200 || /[\u0000-\u001f\u007f]/.test(t)) configErrors.push(`RADIO_STATIONS has an invalid name: "${t.slice(0, 40)}"`);
+}
+if (new Set(CFG.radioStations).size !== CFG.radioStations.length) configErrors.push('RADIO_STATIONS lists a station twice');
+if (CFG.idleMode === 'stations' && !CFG.zoneName) configErrors.push('IDLE_MODE=stations needs ZONE_NAME (the zone the stations play in)');
+
 // Optional shared secret for POST /control (sent by the Inkplate as X-Control-Token).
 const CONTROL_TOKEN = env('CONTROL_TOKEN', '');
 CFG.controlTokenSet = Boolean(CONTROL_TOKEN);
@@ -83,6 +99,9 @@ CFG.controlTokenSet = Boolean(CONTROL_TOKEN);
 if (configErrors.length) {
   console.error('Invalid configuration:\n  ' + configErrors.join('\n  '));
   process.exit(1);
+}
+if (CFG.radioStations.length && CFG.idleMode !== 'stations') {
+  console.warn('Warning: RADIO_STATIONS is ignored unless IDLE_MODE=stations.');
 }
 if (CONTROL_TOKEN && CONTROL_TOKEN.length < 16) {
   console.warn('Warning: CONTROL_TOKEN is short; use at least 16 random characters (e.g. `openssl rand -hex 16`).');
@@ -104,6 +123,32 @@ const TEXT_BOX = PORTRAIT
   ? { x: 0, y: ART, w: CW, h: CH - ART }      // 758 x 266 strip under the art
   : { x: ART, y: 0, w: CW - ART, h: CH };     // 266 x 758 strip beside the art
 const TEXT_PAD = 20;
+
+// Back-to-stations button on the now-playing screen: a 104 px (~13 mm) touch
+// target in the bottom-left corner of the text area, drawn smaller and in grey.
+const BACK = 104;
+const BACK_PAD = 16;
+const BACK_BOX = PORTRAIT
+  ? { x: BACK_PAD, y: CH - BACK_PAD - BACK, w: BACK, h: BACK }
+  : { x: ART + BACK_PAD, y: CH - BACK_PAD - BACK, w: BACK, h: BACK };
+// With the button shown, the text keeps clear of it (and stays centred).
+const TEXT_BOX_WITH_BACK = PORTRAIT
+  ? { x: BACK_PAD + BACK, y: ART, w: CW - 2 * (BACK_PAD + BACK), h: CH - ART }
+  : { x: ART, y: 0, w: CW - ART, h: CH - (BACK + BACK_PAD + 8) };
+
+// Stations screen: a header line, then a grid of up to six tiles.
+const ST = PORTRAIT
+  ? { cols: 2, rows: 3, m: 32, gap: 24, top: 112, bottom: 32 }
+  : { cols: 3, rows: 2, m: 32, gap: 24, top: 100, bottom: 32 };
+const TILE_W = Math.floor((CW - 2 * ST.m - (ST.cols - 1) * ST.gap) / ST.cols);
+const TILE_H = Math.floor((CH - ST.top - ST.bottom - (ST.rows - 1) * ST.gap) / ST.rows);
+const LOGO = 172;
+const tileRect = (i) => ({
+  x: ST.m + (i % ST.cols) * (TILE_W + ST.gap),
+  y: ST.top + Math.floor(i / ST.cols) * (TILE_H + ST.gap),
+  w: TILE_W,
+  h: TILE_H,
+});
 
 // ---------- image helpers ----------------------------------------------------
 
@@ -206,7 +251,7 @@ function blit(canvas, src, sx, sy, sw, sh) {
   for (let y = 0; y < sh; y++) canvas.set(src.subarray(y * sw, (y + 1) * sw), (sy + y) * CW + sx);
 }
 
-async function composeFrame(imageBuf, lines) {
+async function composeFrame(imageBuf, lines, { back = false } = {}) {
   const canvas = new Uint8Array(CW * CH).fill(WHITE);
   if (imageBuf) {
     blit(canvas, await renderArt(imageBuf), 0, 0, ART, ART);
@@ -218,8 +263,158 @@ async function composeFrame(imageBuf, lines) {
     }
   }
   if (CFG.showText) {
-    const text = await renderText(lines, TEXT_BOX);
-    if (text) blit(canvas, text, TEXT_BOX.x, TEXT_BOX.y, TEXT_BOX.w, TEXT_BOX.h);
+    const box = back ? TEXT_BOX_WITH_BACK : TEXT_BOX;
+    const text = await renderText(lines, box);
+    if (text) blit(canvas, text, box.x, box.y, box.w, box.h);
+  }
+  if (back) await drawSvg(canvas, backButtonSvg(), BACK_BOX.x, BACK_BOX.y, BACK, BACK);
+  return canvas;
+}
+
+// ---------- stations screen and back button -----------------------------------
+
+const greyOf = (level) => {
+  const v = Math.round((level * 255) / WHITE).toString(16).padStart(2, '0');
+  return `#${v}${v}${v}`;
+};
+
+// Rasterises an SVG of w x h onto the canvas at (x, y), rounding to the nearest
+// level rather than dithering (flat greys stay flat) and keeping darker pixels.
+async function drawSvg(canvas, svg, x, y, w, h) {
+  const { data } = await sharp(Buffer.from(svg))
+    .flatten({ background: '#ffffff' })
+    .toColourspace('b-w')
+    .raw()
+    .toBuffer({ resolveWithObject: true });
+  for (let yy = 0; yy < h; yy++) {
+    for (let xx = 0; xx < w; xx++) {
+      const level = Math.round((data[yy * w + xx] / 255) * WHITE);
+      const i = (y + yy) * CW + x + xx;
+      if (level < canvas[i]) canvas[i] = level;
+    }
+  }
+}
+
+// A light grey chevron in a thin rounded square, centred in the touch target.
+function backButtonSvg() {
+  const D = 60;
+  const o = (BACK - D) / 2;
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${BACK}" height="${BACK}">`
+    + `<rect x="${o + 1}" y="${o + 1}" width="${D - 2}" height="${D - 2}" rx="14" fill="none" stroke="${greyOf(5)}" stroke-width="2"/>`
+    + `<path d="M${o + 35} ${o + 18} L${o + 23} ${o + 30} L${o + 35} ${o + 42}" fill="none" stroke="${greyOf(3)}" `
+    + 'stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+}
+
+// Renders Pango markup, built for a scale, into an ink map (255 = ink) no larger
+// than maxW x maxH, shrinking the text down to minScale if needed.
+async function renderInk(markup, maxW, maxH, { align = 'centre', minScale = 0.5 } = {}) {
+  let img = null;
+  for (let scale = 1; scale >= minScale - 1e-9; scale -= 0.05) {
+    const { data, info } = await sharp({
+      text: { text: markup(scale), font: CFG.font, width: maxW, dpi: 72, wrap: 'word-char', align, spacing: 2 },
+    })
+      .toColourspace('b-w')
+      .raw()
+      .toBuffer({ resolveWithObject: true });
+    img = { data, width: info.width, height: info.height };
+    if (info.height <= maxH && info.width <= maxW) break;
+  }
+  return img;
+}
+
+// Draws an ink map at (x, y), cropped to w x h; full ink becomes `level`.
+function blitInk(canvas, ink, x, y, w, h, level = 0) {
+  const tw = Math.min(ink.width, w);
+  const th = Math.min(ink.height, h);
+  for (let yy = 0; yy < th; yy++) {
+    for (let xx = 0; xx < tw; xx++) {
+      const a = ink.data[yy * ink.width + xx] / 255;
+      if (!a) continue;
+      const v = Math.round(WHITE - a * (WHITE - level));
+      const i = (y + yy) * CW + x + xx;
+      if (v < canvas[i]) canvas[i] = v;
+    }
+  }
+}
+
+const LOGO_RADIUS = 20;
+function insideRounded(x, y, size, r) {
+  const cx = Math.min(Math.max(x + 0.5, r), size - r);
+  const cy = Math.min(Math.max(y + 0.5, r), size - r);
+  return (x + 0.5 - cx) ** 2 + (y + 0.5 - cy) ** 2 <= r * r;
+}
+
+// Station logo: dithered like a cover (GAMMA applies), with rounded corners.
+async function drawLogo(canvas, imageBuf, x, y) {
+  const { data } = await sharp(imageBuf)
+    .flatten({ background: '#ffffff' })
+    .resize(LOGO, LOGO, { fit: 'cover' })
+    .toColourspace('b-w')
+    .raw()
+    .toBuffer({ resolveWithObject: true });
+  const levels = ditherToLevels(data, LOGO, LOGO, CFG.gamma);
+  for (let yy = 0; yy < LOGO; yy++) {
+    for (let xx = 0; xx < LOGO; xx++) {
+      if (insideRounded(xx, yy, LOGO, LOGO_RADIUS)) canvas[(y + yy) * CW + x + xx] = levels[yy * LOGO + xx];
+    }
+  }
+}
+
+// stations: [{ title, pinned, logo (image Buffer or null) }], up to six. A
+// message (e.g. "Waiting for Roon") replaces the grid.
+async function composeStations(stations, { message = '' } = {}) {
+  const canvas = new Uint8Array(CW * CH).fill(WHITE);
+
+  // Header: "Live Radio", and on the right the zone the stations play in.
+  const head = await renderInk(() => `<span size="${38 * 1024}" weight="bold">Live Radio</span>`, Math.floor(CW / 2), 60, { align: 'left' });
+  const headY = Math.max(0, Math.round((ST.top - 8 - head.height) / 2) + 4);
+  blitInk(canvas, head, ST.m + 4, headY, Math.floor(CW / 2), 60);
+  if (CFG.zoneName) {
+    const zw = Math.floor(CW / 2) - ST.m;
+    const zone = await renderInk((k) => `<span size="${Math.round(24 * k * 1024)}">${esc(cleanLine(CFG.zoneName))}</span>`, zw, 40, { align: 'left' });
+    blitInk(canvas, zone, CW - ST.m - 4 - Math.min(zone.width, zw), headY + Math.max(0, head.height - zone.height - 4), zw, 40, 3);
+  }
+
+  if (message || !stations.length) {
+    const gridH = CH - ST.top - ST.bottom;
+    const ink = await renderInk(() => `<span size="${30 * 1024}">${esc(message || 'No stations')}</span>`, CW - 2 * ST.m, gridH);
+    blitInk(canvas, ink, Math.floor((CW - ink.width) / 2), ST.top + Math.floor((gridH - ink.height) / 2), CW - 2 * ST.m, gridH, 2);
+    return canvas;
+  }
+
+  // Tile outlines, the corner mark on pinned stations, and a plain square
+  // where a station has no logo.
+  const R = 28;
+  let svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${CW}" height="${CH}">`;
+  stations.slice(0, MAX_STATIONS).forEach((st, i) => {
+    const t = tileRect(i);
+    const x0 = t.x + 1.5;
+    const y0 = t.y + 1.5;
+    const x1 = t.x + t.w - 1.5;
+    svg += `<rect x="${x0}" y="${y0}" width="${t.w - 3}" height="${t.h - 3}" rx="${R}" fill="#ffffff" stroke="${greyOf(1)}" stroke-width="3"/>`;
+    if (st.pinned) svg += `<path d="M${x1 - 46} ${y0} H${x1 - R} A${R} ${R} 0 0 1 ${x1} ${y0 + R} V${y0 + 46} Z" fill="${greyOf(1)}"/>`;
+    if (!st.logo) {
+      const lx = t.x + Math.floor((t.w - LOGO) / 2);
+      svg += `<rect x="${lx}" y="${t.y + 22}" width="${LOGO}" height="${LOGO}" rx="${LOGO_RADIUS}" fill="${greyOf(6)}"/>`;
+    }
+  });
+  svg += '</svg>';
+  await drawSvg(canvas, svg, 0, 0, CW, CH);
+
+  for (const [i, st] of stations.slice(0, MAX_STATIONS).entries()) {
+    const t = tileRect(i);
+    const lx = t.x + Math.floor((t.w - LOGO) / 2);
+    const ly = t.y + 22;
+    if (st.logo) {
+      try { await drawLogo(canvas, st.logo, lx, ly); } catch (e) { log('logo render failed:', e.message); }
+    }
+    const top = ly + LOGO + 10;
+    const lw = t.w - 36;
+    const lh = t.y + t.h - 10 - top;
+    const name = await renderInk((k) => `<span size="${Math.round(26 * k * 1024)}" weight="bold">${esc(cleanLine(st.title))}</span>`, lw, lh, { minScale: 0.6 });
+    const nw = Math.min(name.width, lw);
+    const nh = Math.min(name.height, lh);
+    blitInk(canvas, name, t.x + Math.floor((t.w - nw) / 2), top + Math.floor((lh - nh) / 2), lw, lh);
   }
   return canvas;
 }
@@ -255,25 +450,43 @@ async function toPreviewPng(canvas) {
 
 const blankCanvas = () => new Uint8Array(CW * CH).fill(WHITE);
 
-let current = null; // { canvas, packed, etag, at }
+let current = null; // { canvas, packed, etag, at, screen, hotspot, tiles }
 
 // The ETag covers the image only. The frontlight level travels in a header on
 // every response (200 and 304), so light changes never force an e-ink refresh.
-function publish(canvas) {
+// screen: nowplaying | stations | idle. hotspot: the back button, if drawn.
+// tiles: where each station is, for hit-testing taps on the stations screen.
+function publish(canvas, { screen = 'idle', hotspot = null, tiles = null } = {}) {
   const packed = pack(toPanel(canvas));
   const etag = '"' + crypto.createHash('sha1').update(packed).digest('hex').slice(0, 20) + '"';
-  current = { canvas, packed, etag, at: new Date().toISOString() };
-  log(`frame ${etag}`);
+  current = { canvas, packed, etag, at: new Date().toISOString(), screen, hotspot, tiles };
+  log(`frame ${etag} (${screen})`);
 }
 
 const log = (...a) => console.log(new Date().toISOString(), ...a);
 
 // ---------- test mode ----------------------------------------------------------
 
-if (process.argv[2] === '--test') {
-  const [file, l1 = 'Track Title', l2 = 'Artist', l3 = 'Album'] = process.argv.slice(3);
+if (process.argv[2] === '--test' || process.argv[2] === '--test-stations') {
+  const args = process.argv.slice(3);
+  // Stations test: each argument is a station name, optionally "Name=logo.png".
+  // Names listed in RADIO_STATIONS are drawn pinned, first, as on the panel.
+  const testStations = () => args.slice(0, MAX_STATIONS).map((a) => {
+    const eq = a.lastIndexOf('=');
+    const file = eq > 0 ? a.slice(eq + 1) : '';
+    const named = file && fs.existsSync(file);
+    const title = named ? a.slice(0, eq) : a;
+    return { title, logo: named ? fs.readFileSync(file) : null, pinned: CFG.radioStations.includes(title) };
+  }).sort((a, b) => (a.pinned && b.pinned ? CFG.radioStations.indexOf(a.title) - CFG.radioStations.indexOf(b.title) : b.pinned - a.pinned));
   (async () => {
-    const canvas = await composeFrame(file ? fs.readFileSync(file) : null, [l1, l2, l3]);
+    let canvas;
+    if (process.argv[2] === '--test-stations') {
+      const list = testStations();
+      canvas = await composeStations(list, { message: list.length ? '' : 'No stations in My Live Radio' });
+    } else {
+      const [file, l1 = 'Track Title', l2 = 'Artist', l3 = 'Album'] = args;
+      canvas = await composeFrame(file ? fs.readFileSync(file) : null, [l1, l2, l3], { back: CFG.idleMode === 'stations' });
+    }
     fs.writeFileSync('preview.png', await toPreviewPng(canvas));
     fs.writeFileSync('frame.bin', pack(toPanel(canvas)));
     console.log('wrote preview.png and frame.bin');
@@ -289,26 +502,35 @@ const REPO_URL = 'https://github.com/mbdmbd/roon-inkplate'; // shown in Roon's e
 const RoonApiStatus = require('node-roon-api-status');
 const RoonApiTransport = require('node-roon-api-transport');
 const RoonApiImage = require('node-roon-api-image');
+const RoonApiBrowse = require('node-roon-api-browse');
 
 const zones = new Map();
 let imageSvc = null;
 let transport = null;
+let browseSvc = null; // only with IDLE_MODE=stations, and only if the core offers it
 let corePaired = false;
 let lastZoneId = null;
 let displayActive = false; // true while a now-playing frame is up (light allowed on)
 
-// Frontlight level and on/off, adjustable by touch and remembered in the working
-// directory (the /data volume in Docker). Changing FRONTLIGHT resets the level.
+// Remembered in the working directory (the /data volume in Docker): the
+// touch-adjusted frontlight (reset when FRONTLIGHT changes), whether the panel's
+// firmware can show the stations screen, and recently played stations.
 const SETTINGS_FILE = 'display-settings.json';
 const light = { level: CFG.frontlight, enabled: true };
+let clientStations = false; // the panel's firmware sent "X-Features: stations"
+let recentStations = [];    // station titles, most recent first
 try {
   const saved = JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8'));
   if (saved.base === CFG.frontlight && Number.isInteger(saved.level)) light.level = Math.min(63, Math.max(0, saved.level));
   if (typeof saved.enabled === 'boolean') light.enabled = saved.enabled;
+  if (typeof saved.clientStations === 'boolean') clientStations = saved.clientStations;
+  if (Array.isArray(saved.recentStations)) {
+    recentStations = saved.recentStations.filter((t) => typeof t === 'string' && t.length <= 200).slice(0, 20);
+  }
 } catch (e) { /* first run, or an unreadable file: use the defaults */ }
-function saveLight() {
+function saveSettings() {
   try {
-    fs.writeFileSync(SETTINGS_FILE, JSON.stringify({ ...light, base: CFG.frontlight }));
+    fs.writeFileSync(SETTINGS_FILE, JSON.stringify({ ...light, base: CFG.frontlight, clientStations, recentStations }));
   } catch (e) { log('could not save display settings:', e.message); }
 }
 const effectiveLight = () => (displayActive && light.enabled ? light.level : 0);
@@ -316,10 +538,14 @@ let shownSig = 'idle';
 let idleTimer = null;
 let renderSeq = 0;
 
-function getImage(key) {
+// The stations screen needs the setting and firmware that understands it. Older
+// firmware keeps the plain idle screen and gets no back button.
+const stationsEnabled = () => CFG.idleMode === 'stations' && clientStations;
+
+function getImage(key, size = ART) {
   return new Promise((resolve, reject) => {
     if (!imageSvc) return reject(new Error('not paired'));
-    imageSvc.get_image(key, { scale: 'fit', width: ART, height: ART, format: 'image/jpeg' }, (err, type, body) =>
+    imageSvc.get_image(key, { scale: 'fit', width: size, height: size, format: 'image/jpeg' }, (err, type, body) =>
       err ? reject(new Error(err)) : resolve(body));
   });
 }
@@ -330,17 +556,27 @@ function selectZone() {
   return all.find((z) => z.state === 'playing') || all.find((z) => z.state === 'loading') || null;
 }
 
-async function showNowPlaying(sig, imageKey, lines) {
+// What a zone has loaded (playing or not), as the now-playing frame would show it.
+function nowPlayingOf(z) {
+  const np = z && z.now_playing;
+  if (!np) return null;
+  const t = np.three_line || {};
+  const lines = [t.line1 || (np.one_line && np.one_line.line1) || '', t.line2 || '', t.line3 || ''];
+  const back = stationsEnabled();
+  return { sig: ['play', back ? 'back' : '', np.image_key || '', ...lines].join('|'), imageKey: np.image_key, lines, back };
+}
+
+async function showNowPlaying(n) {
   const seq = ++renderSeq;
-  shownSig = sig;
+  shownSig = n.sig;
   let art = null;
-  if (imageKey) {
-    try { art = await getImage(imageKey); } catch (e) { log('image fetch failed:', e.message); }
+  if (n.imageKey) {
+    try { art = await getImage(n.imageKey); } catch (e) { log('image fetch failed:', e.message); }
   }
   try {
-    const canvas = await composeFrame(art, lines);
+    const canvas = await composeFrame(art, n.lines, { back: n.back });
     if (seq === renderSeq) {
-      publish(canvas);
+      publish(canvas, { screen: 'nowplaying', hotspot: n.back ? BACK_BOX : null });
       displayActive = true;
     }
   } catch (e) {
@@ -354,24 +590,256 @@ function goIdle() {
   renderSeq++; // cancel any render in flight
   shownSig = 'idle';
   displayActive = false;
-  if (CFG.idleMode !== 'keep' || !current) publish(blankCanvas());
   log('idle');
+  renderIdle();
+}
+
+function renderIdle() {
+  if (stationsEnabled()) {
+    showStations().catch((e) => {
+      log('stations screen failed:', e.message);
+      publish(blankCanvas());
+    });
+  } else if (CFG.idleMode !== 'keep' || !current) {
+    publish(blankCanvas());
+  }
+}
+
+// ---------- stations ---------------------------------------------------------------
+
+let stationList = null;      // [{ title, imageKey }] from My Live Radio, in Roon's order
+let stationsLoadedAt = 0;
+let missingPinned = [];
+let stationsUntil = 0;       // set while the stations screen opened from the back button is up
+let stationsTimer = null;
+let pendingStation = null;   // { title } after a tap, until Roon reports that station playing
+let pendingTimer = null;
+const logoCache = new Map(); // image_key -> image Buffer
+
+// Browse calls share one session, and each load invalidates the item keys from
+// the previous one, so they run strictly one at a time.
+let browseChain = Promise.resolve();
+function browseTask(fn) {
+  const run = browseChain.then(fn, fn);
+  browseChain = run.catch(() => {});
+  return run;
+}
+function browseCall(method, opts) {
+  return new Promise((resolve, reject) => {
+    if (!browseSvc) return reject(new Error('Roon browse service not available'));
+    browseSvc[method]({ multi_session_key: 'roon-inkplate', ...opts }, (err, body) => (err ? reject(new Error(err)) : resolve(body)));
+  });
+}
+
+// My Live Radio. Each station is an "action" item at the top level: selecting
+// it with a zone starts that station in the zone.
+async function loadRadio(zoneId) {
+  await browseCall('browse', { hierarchy: 'internet_radio', pop_all: true, zone_or_output_id: zoneId });
+  const items = [];
+  for (;;) {
+    const r = await browseCall('load', { hierarchy: 'internet_radio', offset: items.length, count: 100 });
+    items.push(...(r.items || []));
+    if (!r.items || !r.items.length || items.length >= r.list.count || items.length >= 500) break;
+  }
+  stationList = items
+    .filter((it) => it.hint === 'action' && typeof it.title === 'string' && it.title)
+    .map((it) => ({ title: it.title, imageKey: it.image_key || null }));
+  stationsLoadedAt = Date.now();
+  const missing = CFG.radioStations.filter((t) => !stationList.some((s) => s.title === t));
+  if (missing.join('|') !== missingPinned.join('|')) {
+    missingPinned = missing;
+    if (missing.length) log('RADIO_STATIONS not found in My Live Radio:', missing.join(', '));
+  }
+  return items;
+}
+
+function refreshStations() {
+  const z = controlZone();
+  return browseTask(() => loadRadio(z ? z.zone_id : undefined));
+}
+
+async function playStation(title) {
+  const z = controlZone();
+  if (!z) return { ok: false, error: 'no zone' };
+  return browseTask(async () => {
+    const items = await loadRadio(z.zone_id);
+    const it = items.find((i) => i.title === title && i.hint === 'action' && i.item_key);
+    if (!it) return { ok: false, error: 'station is no longer in My Live Radio' };
+    const r = await browseCall('browse', { hierarchy: 'internet_radio', item_key: it.item_key, zone_or_output_id: z.zone_id });
+    if (r && r.action === 'message' && r.is_error) return { ok: false, error: cleanLine(r.message || 'Roon refused') };
+    noteRecent(title);
+    return { ok: true, zone: z.display_name, station: title };
+  });
+}
+
+function noteRecent(title) {
+  if (recentStations[0] === title) return;
+  recentStations = [title, ...recentStations.filter((t) => t !== title)].slice(0, 20);
+  saveSettings();
+}
+
+// Stations started from the Roon app count as played too. Roon shows a live
+// station's name as the first line, and live radio can't seek.
+function noteStationPlaying(z) {
+  if (!stationList || !z || z.state !== 'playing' || z.is_seek_allowed !== false) return;
+  const t = z.now_playing && z.now_playing.three_line;
+  const name = t && t.line1;
+  if (name && stationList.some((s) => s.title === name)) noteRecent(name);
+}
+
+// Pinned stations first, in the order given. The other tiles go to the most
+// recently played stations, shown in My Live Radio order so a tile only moves
+// when a station joins or leaves the screen.
+function chooseStations() {
+  const pinned = CFG.radioStations.map((t) => stationList.find((s) => s.title === t)).filter(Boolean);
+  const rank = (s) => {
+    const i = recentStations.indexOf(s.title);
+    return i < 0 ? recentStations.length : i;
+  };
+  const fill = stationList
+    .map((s, idx) => ({ s, idx }))
+    .filter(({ s }) => !CFG.radioStations.includes(s.title))
+    .sort((a, b) => rank(a.s) - rank(b.s) || a.idx - b.idx)
+    .slice(0, MAX_STATIONS - pinned.length)
+    .sort((a, b) => a.idx - b.idx)
+    .map(({ s }) => s);
+  return [...pinned.map((s) => ({ ...s, pinned: true })), ...fill.map((s) => ({ ...s, pinned: false }))];
+}
+
+async function getLogo(key) {
+  if (logoCache.has(key)) return logoCache.get(key);
+  const buf = await getImage(key, 256);
+  logoCache.set(key, buf);
+  if (logoCache.size > 40) logoCache.delete(logoCache.keys().next().value);
+  return buf;
+}
+
+// Renders and publishes the stations screen; false if something newer won.
+async function showStations() {
+  const seq = ++renderSeq;
+  if (browseSvc && (!stationList || Date.now() - stationsLoadedAt > 10 * 60 * 1000)) {
+    try { await refreshStations(); } catch (e) { log('could not load My Live Radio:', e.message); }
+  }
+  let chosen = [];
+  let message = '';
+  if (!stationList) message = !corePaired ? 'Waiting for Roon' : browseSvc ? 'Could not load My Live Radio' : 'This Roon core does not offer browsing';
+  else if (!stationList.length) message = 'No stations in My Live Radio';
+  else chosen = chooseStations();
+  for (const st of chosen) {
+    st.logo = null;
+    if (!st.imageKey) continue;
+    try { st.logo = await getLogo(st.imageKey); } catch (e) { log('logo fetch failed:', e.message); }
+  }
+  const canvas = await composeStations(chosen, { message });
+  if (seq !== renderSeq) return false;
+  publish(canvas, { screen: 'stations', tiles: chosen.map((st, i) => ({ title: st.title, ...tileRect(i) })) });
+  return true;
+}
+
+// The back button: show the stations screen for STATIONS_TIMEOUT_SEC, then
+// return to what the zone has loaded.
+function armStationsTimer() {
+  clearTimeout(stationsTimer);
+  stationsUntil = Date.now() + CFG.stationsTimeoutSec * 1000;
+  stationsTimer = setTimeout(closeStations, CFG.stationsTimeoutSec * 1000);
+}
+
+async function openStations() {
+  if (!stationsEnabled()) return { ok: false, error: 'stations screen not enabled' };
+  if (current.screen === 'stations') {
+    if (stationsUntil) armStationsTimer();
+    return { ok: true, screen: 'stations' };
+  }
+  if (shownSig !== 'idle') {
+    if (idleTimer) { clearTimeout(idleTimer); idleTimer = null; }
+    armStationsTimer();
+  }
+  return (await showStations()) ? { ok: true, screen: 'stations' } : { ok: false, error: 'screen changed' };
+}
+
+function closeStations() {
+  clearTimeout(stationsTimer);
+  stationsTimer = null;
+  if (!stationsUntil) return;
+  stationsUntil = 0;
+  const n = nowPlayingOf(selectZone());
+  if (n) showNowPlaying(n);
+  else goIdle();
+  evaluate();
+}
+
+async function selectAt(x, y, ifMatch) {
+  if (!current || current.screen !== 'stations' || ifMatch !== current.etag) {
+    return { ok: false, status: 412, error: 'the screen has changed' };
+  }
+  const tile = current.tiles.find((t) => x >= t.x && x < t.x + t.w && y >= t.y && y < t.y + t.h);
+  if (!tile) {
+    if (!stationsUntil) return { ok: false, error: 'no station there' };
+    closeStations();
+    return { ok: true, closed: true };
+  }
+  const result = await playStation(tile.title);
+  if (result.ok) {
+    // Keep this screen until Roon reports the new station, so the previous
+    // track doesn't flash up in between; give up after 10 s.
+    clearTimeout(stationsTimer);
+    stationsTimer = null;
+    clearTimeout(pendingTimer);
+    pendingStation = { title: tile.title };
+    pendingTimer = setTimeout(() => {
+      pendingStation = null;
+      if (stationsUntil) closeStations();
+      else evaluate();
+    }, 10000);
+    evaluate();
+  }
+  return result;
 }
 
 function evaluate() {
   const z = selectZone();
-  const np = z && z.now_playing;
-  const active = np && (z.state === 'playing' || z.state === 'loading');
+  noteStationPlaying(z);
+  const n = nowPlayingOf(z);
+  const active = n && (z.state === 'playing' || z.state === 'loading');
+
+  if (pendingStation) {
+    if (!active || n.lines[0] !== pendingStation.title) return;
+    clearTimeout(pendingTimer);
+    pendingStation = null;
+    clearTimeout(stationsTimer);
+    stationsTimer = null;
+    stationsUntil = 0;
+  }
+  if (stationsUntil) return; // the stations screen from the back button decides when to leave
 
   if (active) {
     lastZoneId = z.zone_id;
     if (idleTimer) { clearTimeout(idleTimer); idleTimer = null; }
-    const t = np.three_line || {};
-    const lines = [t.line1 || (np.one_line && np.one_line.line1) || '', t.line2 || '', t.line3 || ''];
-    const sig = ['play', np.image_key || '', ...lines].join('|');
-    if (sig !== shownSig) showNowPlaying(sig, np.image_key, lines);
+    if (n.sig !== shownSig) showNowPlaying(n);
   } else if (shownSig !== 'idle' && !idleTimer) {
     idleTimer = setTimeout(goIdle, CFG.graceSec * 1000);
+  }
+}
+
+// Set from each /frame request the panel makes. Switching redraws the panel
+// with or without the stations screen and back button.
+function setClientStations(supported) {
+  if (supported === clientStations) return;
+  clientStations = supported;
+  saveSettings();
+  log(supported ? 'panel firmware supports the stations screen' : 'panel firmware has no stations screen');
+  if (CFG.idleMode !== 'stations') return;
+  clearTimeout(pendingTimer);
+  pendingStation = null;
+  clearTimeout(stationsTimer);
+  stationsUntil = 0;
+  if (shownSig === 'idle') {
+    renderSeq++;
+    renderIdle();
+  } else {
+    const n = nowPlayingOf(selectZone());
+    if (n) showNowPlaying(n);
+    evaluate();
   }
 }
 
@@ -403,14 +871,26 @@ const roon = new RoonApi({
     corePaired = true;
     imageSvc = core.services.RoonApiImage;
     transport = core.services.RoonApiTransport;
+    browseSvc = CFG.idleMode === 'stations' ? core.services.RoonApiBrowse || null : null;
     status.set_status(`Paired with ${core.display_name}`, false);
     log('paired with', core.display_name);
     core.services.RoonApiTransport.subscribe_zones(onZones);
+    if (CFG.idleMode !== 'stations') return;
+    if (!browseSvc) return log('this Roon core does not offer browsing; the stations screen will be empty');
+    refreshStations()
+      .then(() => {
+        if (shownSig === 'idle' && stationsEnabled() && !stationsUntil) {
+          renderSeq++;
+          renderIdle();
+        }
+      })
+      .catch((e) => log('could not load My Live Radio:', e.message));
   },
   core_unpaired(core) {
     corePaired = false;
     imageSvc = null;
     transport = null;
+    browseSvc = null;
     zones.clear();
     status.set_status('Waiting for Roon core', true);
     log('unpaired from', core.display_name);
@@ -419,7 +899,12 @@ const roon = new RoonApi({
 });
 
 const status = new RoonApiStatus(roon);
-roon.init_services({ required_services: [RoonApiTransport, RoonApiImage], provided_services: [status] });
+roon.init_services({
+  required_services: [RoonApiTransport, RoonApiImage],
+  // Browsing (My Live Radio) is only requested for the stations screen.
+  optional_services: CFG.idleMode === 'stations' ? [RoonApiBrowse] : [],
+  provided_services: [status],
+});
 status.set_status('Starting', false);
 publish(blankCanvas());
 
@@ -526,9 +1011,12 @@ async function changeVolume(dir) {
   return { ok: results.some((r) => r.to !== undefined || r.changed), results };
 }
 
-const ACTIONS = new Set(['playpause', 'next', 'previous', 'vol_up', 'vol_down', 'light_toggle', 'light_up', 'light_down']);
+const ACTIONS = new Set(['playpause', 'next', 'previous', 'vol_up', 'vol_down', 'light_toggle', 'light_up', 'light_down', 'stations', 'select']);
 
-async function handleControl(action) {
+async function handleControl(action, { x, y, ifMatch } = {}) {
+  // While idle the light is off, so a change would be invisible and only show
+  // up (as a surprise) when music next starts. Refuse it instead.
+  if (action.startsWith('light_') && !displayActive) return { ok: false, error: 'display is idle' };
   switch (action) {
     case 'playpause':
     case 'next':
@@ -541,17 +1029,21 @@ async function handleControl(action) {
     case 'light_toggle':
       light.enabled = !light.enabled;
       if (light.enabled && light.level === 0) light.level = CFG.frontlight || CFG.lightStep;
-      saveLight();
+      saveSettings();
       return { ok: true, light };
     case 'light_up':
       light.level = Math.min(63, light.level + CFG.lightStep);
       light.enabled = true;
-      saveLight();
+      saveSettings();
       return { ok: true, light };
     case 'light_down':
       light.level = Math.max(0, light.level - CFG.lightStep);
-      saveLight();
+      saveSettings();
       return { ok: true, light };
+    case 'stations':
+      return openStations();
+    case 'select':
+      return selectAt(x, y, ifMatch);
     default:
       return { ok: false, error: `unknown action: ${action}` };
   }
@@ -606,13 +1098,22 @@ http
     }
     try {
       if (path === '/frame') {
+        // The panel's firmware says whether it can use the stations screen.
+        // Other clients (curl, scripts) don't change the setting.
+        if (/\bstations\b/.test(String(req.headers['x-features'] || ''))) setClientStations(true);
+        else if (req.headers['user-agent'] === 'ESP32HTTPClient') setClientStations(false);
         const meta = {
           ETag: current.etag,
           'X-Frontlight': String(effectiveLight()),
           'X-Layout': CFG.layout,
           'X-Rotate': String(CFG.rotate),
+          'X-Screen': current.screen,
           'Cache-Control': 'no-cache',
         };
+        if (current.hotspot) {
+          const b = current.hotspot;
+          meta['X-Stations-Button'] = `${b.x},${b.y},${b.w},${b.h}`;
+        }
         if (req.headers['if-none-match'] === current.etag) {
           res.writeHead(304, meta);
           return res.end();
@@ -637,16 +1138,32 @@ http
           res.writeHead(401, json);
           return res.end(JSON.stringify({ ok: false, error: 'missing or wrong X-Control-Token' }));
         }
-        const action = new URL(req.url, 'http://bridge').searchParams.get('action');
+        const params = new URL(req.url, 'http://bridge').searchParams;
+        const action = params.get('action');
         if (!ACTIONS.has(action)) {
           log('control: unknown action', JSON.stringify(String(action).slice(0, 40)));
           res.writeHead(400, json);
           return res.end(JSON.stringify({ ok: false, error: 'unknown action' }));
         }
+        // select: a tap on the stations screen, in upright canvas pixels, with the
+        // ETag of the frame the panel is showing (If-Match).
+        const opts = {};
+        if (action === 'select') {
+          const coord = (k, max) => (/^\d{1,5}$/.test(params.get(k) || '') && Number(params.get(k)) < max ? Number(params.get(k)) : null);
+          opts.x = coord('x', CW);
+          opts.y = coord('y', CH);
+          opts.ifMatch = String(req.headers['if-match'] || '');
+          if (opts.x === null || opts.y === null) {
+            res.writeHead(400, json);
+            return res.end(JSON.stringify({ ok: false, error: 'select needs x and y on the screen' }));
+          }
+        }
         let result;
-        try { result = await handleControl(action); } catch (e) { result = { ok: false, error: e.message }; }
+        try { result = await handleControl(action, opts); } catch (e) { result = { ok: false, error: e.message }; }
+        const code = result.status || (result.ok ? 200 : 409);
+        delete result.status;
         log(`control ${action}:`, JSON.stringify(result));
-        res.writeHead(result.ok ? 200 : 409, {
+        res.writeHead(code, {
           'Content-Type': 'application/json; charset=utf-8',
           'X-Frontlight': String(effectiveLight()),
         });
@@ -662,9 +1179,19 @@ http
         return res.end(JSON.stringify({
           zone: CFG.zoneName || '(first playing)',
           zones: [...zones.values()].map((z) => ({ name: z.display_name, state: z.state })),
-          shown: shownSig, etag: current.etag, updated: current.at,
+          shown: shownSig, screen: current.screen, etag: current.etag, updated: current.at,
           light: { ...light, now: effectiveLight() },
-          idlePending: Boolean(idleTimer), config: CFG,
+          idlePending: Boolean(idleTimer),
+          stations: CFG.idleMode === 'stations' ? {
+            panelSupports: clientStations,
+            browse: Boolean(browseSvc),
+            myLiveRadio: stationList ? stationList.map((st) => st.title) : null,
+            pinnedNotFound: missingPinned,
+            recent: recentStations,
+            onScreen: current.tiles ? current.tiles.map((t) => t.title) : null,
+            backButtonUntil: stationsUntil ? new Date(stationsUntil).toISOString() : null,
+          } : undefined,
+          config: CFG,
         }, null, 2));
       }
       res.writeHead(404);

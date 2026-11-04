@@ -26,9 +26,11 @@ roon-inkplate is meant for a trusted home network. In summary:
 - **The volume ceiling is enforced by the bridge**, not the panel, and settings
   are validated at startup: the bridge refuses to run with a value that could
   defeat it.
-- **Untrusted metadata is bounded.** Track text (which internet radio stations
-  control) is stripped of control characters, capped in length and escaped
-  before rendering.
+- **Untrusted metadata is bounded.** Track text and station names (which
+  internet radio stations control) are stripped of control characters, capped
+  in length and escaped before rendering. Taps on the stations screen
+  (`action=select`) are range-checked and only accepted against the frame the
+  panel is showing (`If-Match`).
 - **Secrets stay out of git.** The Roon pairing token (`bridge/config.json`)
   and the firmware's `config.h` (Wi-Fi password, control token) are in
   `.gitignore`, and files the bridge writes are readable only by its user.

@@ -25,7 +25,7 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"   # lets Linux hosts use host.docker.internal too
     volumes:
-      - roon-inkplate-data:/data       # Roon pairing (config.json) and touch-adjusted light (display-settings.json)
+      - roon-inkplate-data:/data       # Roon pairing (config.json); light level and recent stations (display-settings.json)
       # Optional: use your own fonts, then set FONT to the family name, e.g. on macOS:
       # - ~/Library/Fonts:/usr/share/fonts/user:ro
     environment:
@@ -39,7 +39,12 @@ services:
       # ---- What to show -------------------------------------------------------
       ZONE_NAME: ""                     # exact zone name from /status; empty = whichever zone is playing
       IDLE_GRACE_SEC: "120"             # seconds paused/stopped before the panel goes idle
-      IDLE_MODE: blank                  # blank = white panel when idle; keep = last cover stays, unlit
+      IDLE_MODE: blank                  # blank = white panel when idle; keep = last cover stays, unlit;
+                                        # stations = Live Radio buttons when idle, plus a back button while
+                                        # playing (needs ZONE_NAME and firmware v1.2.0+; see README)
+      RADIO_STATIONS: ""                # stations mode: up to 6 stations pinned first, exactly as named in
+                                        # Roon's My Live Radio, separated by | ; other tiles = recently played
+      STATIONS_TIMEOUT_SEC: "20"        # stations mode: how long the back button's stations screen stays up
 
       # ---- Layout and image ---------------------------------------------------
       LAYOUT: portrait                  # portrait = art above text; landscape = art left, text right

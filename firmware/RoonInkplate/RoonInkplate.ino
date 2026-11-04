@@ -10,6 +10,8 @@
  *   Album art:  tap = play/pause, swipe left = next, swipe right = previous,
  *               swipe up = volume up, swipe down = volume down
  *   Text area:  tap = light on/off, swipe up = brighter, swipe down = dimmer
+ *   Back button (bottom left, when the bridge draws it): tap = stations screen
+ *   Stations screen: tap a station to play it; tap elsewhere to go back
  * A quick pulse of the frontlight confirms a playback or volume command.
  *
  * Board: Tools > Board > Soldered Inkplate Boards > "Soldered Inkplate 6PLUS"
@@ -55,6 +57,9 @@ static int currentLight = 0;  // frontlight level 0-63 (off after every reset)
 static bool portrait = true;  // layout and rotation come from the bridge's headers
 static int rotateDeg = 90;
 static bool touchOk = false;
+static bool onStations = false;   // the frame on the panel is the stations screen
+static bool hasBackButton = false; // ...or a now-playing frame with a back button here:
+static int backBtn[4];             // x, y, w, h in viewer coordinates
 static uint8_t rxBuf[4096];
 static uint32_t lastPollAt = 0;
 static uint32_t lastPollOk = 0;
@@ -120,7 +125,8 @@ void pulseLight()
 
 // ------------------------------------------------------------------ bridge
 
-static const char *HEADER_KEYS[] = {"ETag", "X-Frontlight", "X-Layout", "X-Rotate"};
+static const char *HEADER_KEYS[] = {"ETag", "X-Frontlight", "X-Layout", "X-Rotate", "X-Screen", "X-Stations-Button"};
+static const size_t HEADER_COUNT = sizeof(HEADER_KEYS) / sizeof(HEADER_KEYS[0]);
 
 // Picks up layout/rotation; returns the frontlight level, or -1 if absent.
 int readBridgeHeaders(HTTPClient &http)
@@ -135,6 +141,16 @@ int readBridgeHeaders(HTTPClient &http)
     return light.length() ? light.toInt() : -1;
 }
 
+// What the frame on the panel is, for touch handling. Only call this for the
+// frame actually shown (a 304, or a 200 once it's drawn). An older bridge
+// sends neither header: plain now-playing gestures, as before.
+void readScreenHeaders(HTTPClient &http)
+{
+    onStations = http.header("X-Screen") == "stations";
+    String b = http.header("X-Stations-Button");
+    hasBackButton = b.length() && sscanf(b.c_str(), "%d,%d,%d,%d", &backBtn[0], &backBtn[1], &backBtn[2], &backBtn[3]) == 4;
+}
+
 // Returns true if the bridge answered (200 or 304), false on any failure.
 bool pollBridge()
 {
@@ -143,7 +159,8 @@ bool pollBridge()
     http.setTimeout(10000);
     if (!http.begin(BRIDGE_URL))
         return false;
-    http.collectHeaders(HEADER_KEYS, 4);
+    http.collectHeaders(HEADER_KEYS, HEADER_COUNT);
+    http.addHeader("X-Features", "stations"); // this firmware can use the stations screen
     if (etag.length())
         http.addHeader("If-None-Match", etag);
 
@@ -151,6 +168,7 @@ bool pollBridge()
     if (code == HTTP_CODE_NOT_MODIFIED)
     {
         int light = readBridgeHeaders(http);
+        readScreenHeaders(http);
         http.end();
         if (light >= 0)
             fadeTo(light); // light changes arrive without a new frame
@@ -198,9 +216,12 @@ bool pollBridge()
 
     String newTag = http.header("ETag");
     int light = readBridgeHeaders(http);
+    bool gotAll = got == FRAME_BYTES;
+    if (gotAll)
+        readScreenHeaders(http);
     http.end();
 
-    if (got != FRAME_BYTES)
+    if (!gotAll)
     {
         Serial.printf("bridge: short read %u/%u\n", (unsigned)got, (unsigned)FRAME_BYTES);
         return false; // etag unchanged, so the next poll fetches it again
@@ -216,27 +237,34 @@ bool pollBridge()
     return true;
 }
 
-// Sends a touch command; returns true if the bridge carried it out.
-bool sendControl(const char *action)
+// Sends a touch command; returns true if the bridge carried it out. `query` adds
+// parameters (e.g. "&x=10&y=20"); `ifMatch` sends the shown frame's ETag.
+bool sendControl(const char *action, const String &query = "", bool ifMatch = false)
 {
     if (WiFi.status() != WL_CONNECTED)
         return false;
     HTTPClient http;
     http.setConnectTimeout(2000);
-    http.setTimeout(4000);
-    if (!http.begin(controlUrl + "?action=" + action))
+    http.setTimeout(8000); // starting a radio station can take a few seconds
+    if (!http.begin(controlUrl + "?action=" + action + query))
         return false;
     if (strlen(CONTROL_TOKEN) > 0)
         http.addHeader("X-Control-Token", CONTROL_TOKEN);
-    http.collectHeaders(HEADER_KEYS, 4);
+    if (ifMatch && etag.length())
+        http.addHeader("If-Match", etag);
+    http.collectHeaders(HEADER_KEYS, HEADER_COUNT);
     int code = http.POST("");
     int light = readBridgeHeaders(http);
     http.end();
-    Serial.printf("control %s: HTTP %d\n", action, code);
+    Serial.printf("control %s%s: HTTP %d\n", action, query.c_str(), code);
     if (code == 401)
         Serial.println("control: bridge wants a CONTROL_TOKEN; check config.h matches the bridge");
     if (light >= 0)
         fadeTo(light);
+    // The screen may be about to change (or already has, if 412): poll now
+    // rather than up to POLL_INTERVAL_MS later.
+    if (code == HTTP_CODE_OK || code == 412)
+        lastPollAt = 0;
     return code == HTTP_CODE_OK;
 }
 
@@ -269,13 +297,28 @@ void finishGesture()
     int dy = g.ly - g.sy;
     int adx = abs(dx), ady = abs(dy);
     uint32_t ms = g.tLast - g.t0;
+    bool tap = adx <= TAP_MAX_PX && ady <= TAP_MAX_PX && ms <= TAP_MAX_MS;
+
+    // Stations screen: only taps, sent with their position; the bridge knows
+    // where each station is. Swipes do nothing here.
+    if (onStations)
+    {
+        Serial.printf("touch: stations (%d,%d) dx=%d dy=%d %ums -> %s\n", g.sx, g.sy, dx, dy, (unsigned)ms,
+                      tap ? "select" : "ignored");
+        if (tap && sendControl("select", "&x=" + String(g.sx) + "&y=" + String(g.sy), true))
+            pulseLight();
+        return;
+    }
+
     bool inArt = g.sx < ART && g.sy < ART;
+    bool onBack = hasBackButton && g.sx >= backBtn[0] && g.sx < backBtn[0] + backBtn[2] && g.sy >= backBtn[1] &&
+                  g.sy < backBtn[1] + backBtn[3];
     const char *action = nullptr;
 
     if (adx <= TAP_MAX_PX && ady <= TAP_MAX_PX)
     {
         if (ms <= TAP_MAX_MS)
-            action = inArt ? "playpause" : "light_toggle";
+            action = onBack ? "stations" : inArt ? "playpause" : "light_toggle";
     }
     else if (adx >= SWIPE_MIN_PX && adx > ady * 2)
     {
