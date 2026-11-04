@@ -136,10 +136,12 @@ const TEXT_BOX_WITH_BACK = PORTRAIT
   ? { x: BACK_PAD + BACK, y: ART, w: CW - 2 * (BACK_PAD + BACK), h: CH - ART }
   : { x: ART, y: 0, w: CW - ART, h: CH - (BACK + BACK_PAD + 8) };
 
-// Stations screen: a header line, then a grid of up to six tiles.
+// Stations screen: a header, then a grid of up to six tiles.
 const ST = PORTRAIT
-  ? { cols: 2, rows: 3, m: 32, gap: 24, top: 112, bottom: 32 }
-  : { cols: 3, rows: 2, m: 32, gap: 24, top: 100, bottom: 32 };
+  ? { cols: 2, rows: 3, m: 32, gap: 24, top: 136, bottom: 32 }
+  : { cols: 3, rows: 2, m: 32, gap: 24, top: 124, bottom: 32 };
+// Resume button, on the right of the header: plays what the zone has loaded.
+const RESUME_BOX = { w: 300, h: 84, x: CW - ST.m - 300, y: Math.round((ST.top - 84) / 2) - 2 };
 const TILE_W = Math.floor((CW - 2 * ST.m - (ST.cols - 1) * ST.gap) / ST.cols);
 const TILE_H = Math.floor((CH - ST.top - ST.bottom - (ST.rows - 1) * ST.gap) / ST.rows);
 const LOGO = 172;
@@ -307,11 +309,11 @@ function backButtonSvg() {
 
 // Renders Pango markup, built for a scale, into an ink map (255 = ink) no larger
 // than maxW x maxH, shrinking the text down to minScale if needed.
-async function renderInk(markup, maxW, maxH, { align = 'centre', minScale = 0.5 } = {}) {
+async function renderInk(markup, maxW, maxH, { align = 'centre', minScale = 0.5, wrap = 'word-char' } = {}) {
   let img = null;
   for (let scale = 1; scale >= minScale - 1e-9; scale -= 0.05) {
     const { data, info } = await sharp({
-      text: { text: markup(scale), font: CFG.font, width: maxW, dpi: 72, wrap: 'word-char', align, spacing: 2 },
+      text: { text: markup(scale), font: CFG.font, width: maxW, dpi: 72, wrap, align, spacing: 2 },
     })
       .toColourspace('b-w')
       .raw()
@@ -335,6 +337,22 @@ function blitInk(canvas, ink, x, y, w, h, level = 0) {
       if (v < canvas[i]) canvas[i] = v;
     }
   }
+}
+
+// One line of text, shortened with an ellipsis until it fits maxW.
+async function renderOneLine(text, sizePx, maxW, attrs = '') {
+  const chars = Array.from(cleanLine(text));
+  const make = (n) => renderInk(() => `<span size="${sizePx * 1024}"${attrs}>${esc(n < chars.length ? chars.slice(0, n).join('').trimEnd() + '…' : chars.join(''))}</span>`, maxW * 2, sizePx * 2, { align: 'left', wrap: 'none', minScale: 1 });
+  let ink = await make(chars.length);
+  if (ink.width <= maxW) return ink;
+  let lo = 0;
+  let hi = chars.length - 1;
+  while (lo < hi) { // longest prefix that fits
+    const mid = Math.ceil((lo + hi) / 2);
+    if ((await make(mid)).width <= maxW) lo = mid;
+    else hi = mid - 1;
+  }
+  return make(lo);
 }
 
 const LOGO_RADIUS = 20;
@@ -361,18 +379,33 @@ async function drawLogo(canvas, imageBuf, x, y) {
 }
 
 // stations: [{ title, pinned, logo (image Buffer or null) }], up to six. A
-// message (e.g. "Waiting for Roon") replaces the grid.
-async function composeStations(stations, { message = '' } = {}) {
+// message (e.g. "Waiting for Roon") replaces the grid. resume: { title } of
+// what the zone has loaded, for the Resume button, or null to leave it out.
+async function composeStations(stations, { message = '', resume = null } = {}) {
   const canvas = new Uint8Array(CW * CH).fill(WHITE);
 
-  // Header: "Live Radio", and on the right the zone the stations play in.
-  const head = await renderInk(() => `<span size="${38 * 1024}" weight="bold">Live Radio</span>`, Math.floor(CW / 2), 60, { align: 'left' });
-  const headY = Math.max(0, Math.round((ST.top - 8 - head.height) / 2) + 4);
-  blitInk(canvas, head, ST.m + 4, headY, Math.floor(CW / 2), 60);
-  if (CFG.zoneName) {
-    const zw = Math.floor(CW / 2) - ST.m;
-    const zone = await renderInk((k) => `<span size="${Math.round(24 * k * 1024)}">${esc(cleanLine(CFG.zoneName))}</span>`, zw, 40, { align: 'left' });
-    blitInk(canvas, zone, CW - ST.m - 4 - Math.min(zone.width, zw), headY + Math.max(0, head.height - zone.height - 4), zw, 40, 3);
+  // Header: "Live Radio" with the zone the stations play in underneath.
+  const hw = CW - 2 * ST.m - RESUME_BOX.w - 16;
+  const head = await renderInk(() => `<span size="${38 * 1024}" weight="bold">Live Radio</span>`, hw, 60, { align: 'left' });
+  const zone = CFG.zoneName ? await renderOneLine(CFG.zoneName, 22, hw) : null;
+  const blockH = head.height + (zone ? zone.height + 8 : 0);
+  const headY = RESUME_BOX.y + Math.round((RESUME_BOX.h - blockH) / 2);
+  blitInk(canvas, head, ST.m + 4, headY, hw, 60);
+  if (zone) blitInk(canvas, zone, ST.m + 4, headY + head.height + 8, hw, 40, 3);
+
+  // Resume: a play triangle, "Resume", and what will play.
+  if (resume) {
+    const b = RESUME_BOX;
+    const cy = b.y + b.h / 2;
+    await drawSvg(canvas, `<svg xmlns="http://www.w3.org/2000/svg" width="${CW}" height="${ST.top}">`
+      + `<rect x="${b.x + 1.5}" y="${b.y + 1.5}" width="${b.w - 3}" height="${b.h - 3}" rx="22" fill="#ffffff" stroke="${greyOf(1)}" stroke-width="3"/>`
+      + `<path d="M${b.x + 26} ${cy - 17} L${b.x + 26} ${cy + 17} L${b.x + 54} ${cy} Z" fill="${greyOf(0)}"/></svg>`, 0, 0, CW, ST.top);
+    const tw = b.w - 70 - 16;
+    const label = await renderInk(() => `<span size="${26 * 1024}" weight="bold">Resume</span>`, tw, 40, { align: 'left' });
+    const what = await renderOneLine(resume.title || 'what was playing', 19, tw);
+    const ty = b.y + Math.round((b.h - label.height - what.height - 5) / 2);
+    blitInk(canvas, label, b.x + 70, ty, tw, 40);
+    blitInk(canvas, what, b.x + 70, ty + label.height + 5, tw, 30, 2);
   }
 
   if (message || !stations.length) {
@@ -456,10 +489,10 @@ let current = null; // { canvas, packed, etag, at, screen, hotspot, tiles }
 // every response (200 and 304), so light changes never force an e-ink refresh.
 // screen: nowplaying | stations | idle. hotspot: the back button, if drawn.
 // tiles: where each station is, for hit-testing taps on the stations screen.
-function publish(canvas, { screen = 'idle', hotspot = null, tiles = null } = {}) {
+function publish(canvas, { screen = 'idle', hotspot = null, tiles = null, resume = null, resumeSig = '' } = {}) {
   const packed = pack(toPanel(canvas));
   const etag = '"' + crypto.createHash('sha1').update(packed).digest('hex').slice(0, 20) + '"';
-  current = { canvas, packed, etag, at: new Date().toISOString(), screen, hotspot, tiles };
+  current = { canvas, packed, etag, at: new Date().toISOString(), screen, hotspot, tiles, resume, resumeSig };
   log(`frame ${etag} (${screen})`);
 }
 
@@ -471,7 +504,9 @@ if (process.argv[2] === '--test' || process.argv[2] === '--test-stations') {
   const args = process.argv.slice(3);
   // Stations test: each argument is a station name, optionally "Name=logo.png".
   // Names listed in RADIO_STATIONS are drawn pinned, first, as on the panel.
-  const testStations = () => args.slice(0, MAX_STATIONS).map((a) => {
+  // An argument "resume=Title" draws the Resume button with that title.
+  const resumeArg = args.find((a) => a.startsWith('resume='));
+  const testStations = () => args.filter((a) => !a.startsWith('resume=')).slice(0, MAX_STATIONS).map((a) => {
     const eq = a.lastIndexOf('=');
     const file = eq > 0 ? a.slice(eq + 1) : '';
     const named = file && fs.existsSync(file);
@@ -482,7 +517,10 @@ if (process.argv[2] === '--test' || process.argv[2] === '--test-stations') {
     let canvas;
     if (process.argv[2] === '--test-stations') {
       const list = testStations();
-      canvas = await composeStations(list, { message: list.length ? '' : 'No stations in My Live Radio' });
+      canvas = await composeStations(list, {
+        message: list.length ? '' : 'No stations in My Live Radio',
+        resume: resumeArg ? { title: resumeArg.slice('resume='.length) } : null,
+      });
     } else {
       const [file, l1 = 'Track Title', l2 = 'Artist', l3 = 'Album'] = args;
       canvas = await composeFrame(file ? fs.readFileSync(file) : null, [l1, l2, l3], { back: CFG.idleMode === 'stations' });
@@ -722,6 +760,15 @@ async function getLogo(key) {
   return buf;
 }
 
+// What the zone would play if resumed: shown on the Resume button while
+// nothing is playing and Roon allows play.
+function resumeInfo() {
+  const z = controlZone();
+  if (!z || z.state === 'playing' || z.state === 'loading' || !z.is_play_allowed) return null;
+  const n = nowPlayingOf(z);
+  return n ? { title: n.lines[0] } : null;
+}
+
 // Renders and publishes the stations screen; false if something newer won.
 async function showStations() {
   const seq = ++renderSeq;
@@ -738,9 +785,15 @@ async function showStations() {
     if (!st.imageKey) continue;
     try { st.logo = await getLogo(st.imageKey); } catch (e) { log('logo fetch failed:', e.message); }
   }
-  const canvas = await composeStations(chosen, { message });
+  const resume = resumeInfo();
+  const canvas = await composeStations(chosen, { message, resume });
   if (seq !== renderSeq) return false;
-  publish(canvas, { screen: 'stations', tiles: chosen.map((st, i) => ({ title: st.title, ...tileRect(i) })) });
+  publish(canvas, {
+    screen: 'stations',
+    tiles: chosen.map((st, i) => ({ title: st.title, ...tileRect(i) })),
+    resume: resume ? RESUME_BOX : null,
+    resumeSig: resume ? resume.title : '',
+  });
   return true;
 }
 
@@ -780,7 +833,13 @@ async function selectAt(x, y, ifMatch) {
   if (!current || current.screen !== 'stations' || ifMatch !== current.etag) {
     return { ok: false, status: 412, error: 'the screen has changed' };
   }
-  const tile = current.tiles.find((t) => x >= t.x && x < t.x + t.w && y >= t.y && y < t.y + t.h);
+  const inside = (b) => x >= b.x && x < b.x + b.w && y >= b.y && y < b.y + b.h;
+  if (current.resume && inside(current.resume)) {
+    const result = await transportControl('play');
+    if (result.ok && stationsUntil) closeStations();
+    return result;
+  }
+  const tile = current.tiles.find(inside);
   if (!tile) {
     if (!stationsUntil) return { ok: false, error: 'no station there' };
     closeStations();
@@ -826,6 +885,13 @@ function evaluate() {
     if (n.sig !== shownSig) showNowPlaying(n);
   } else if (shownSig !== 'idle' && !idleTimer) {
     idleTimer = setTimeout(goIdle, CFG.graceSec * 1000);
+  } else if (shownSig === 'idle' && current.screen === 'stations' && stationsEnabled()) {
+    // Idle on the stations screen: redraw if what Resume would play has changed.
+    const r = resumeInfo();
+    if ((r ? r.title : '') !== current.resumeSig) {
+      renderSeq++;
+      showStations().catch((e) => log('stations screen failed:', e.message));
+    }
   }
 }
 
@@ -993,6 +1059,7 @@ async function transportControl(action) {
     next: z.is_next_allowed,
     previous: z.is_previous_allowed,
     playpause: z.is_play_allowed || z.is_pause_allowed,
+    play: z.is_play_allowed,
   }[action];
   if (!allowed) return { ok: false, error: `${action} not available right now` };
   await roonCall((cb) => transport.control(z, action, cb));
@@ -1216,6 +1283,7 @@ http
             pinnedNotFound: missingPinned,
             recent: recentStations,
             onScreen: current.tiles ? current.tiles.map((t) => t.title) : null,
+            resume: current.resume ? current.resumeSig : null,
             backButtonUntil: stationsUntil ? new Date(stationsUntil).toISOString() : null,
           } : undefined,
           config: CFG,

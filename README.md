@@ -98,6 +98,7 @@ Directions are as you look at the panel. Each control only responds within its o
 | Text strip | swipe down | frontlight dimmer by `LIGHT_STEP` |
 | Back button (bottom left, stations mode only) | tap | show the stations screen |
 | Stations screen | tap a station | play it |
+| Stations screen | tap Resume | play what Roon has loaded in the zone (shown when something is paused or stopped) |
 | Stations screen | tap elsewhere | back to what's playing (when opened with the back button) |
 
 The frontlight controls only work while something is showing. When the panel is idle they do nothing, so the light setting can't change unseen.
@@ -152,6 +153,8 @@ The Inkplate's own settings in `config.h` cover only the connection: Wi-Fi, the 
 With `IDLE_MODE: stations`, the idle panel shows up to six buttons for Roon Live Radio stations. Tap one and it starts playing in `ZONE_NAME`; the panel then switches to the station's now-playing screen as usual. While music plays, a small back button in the bottom-left corner brings the stations screen up for `STATIONS_TIMEOUT_SEC` seconds. Tap a station to switch to it, or tap anywhere else to go back.
 
 The buttons come from **My Live Radio** in Roon, so add the stations you want there first (in Roon, under **Live Radio**, or with **Add Station** for a stream URL). The bridge can only play stations that are in that list.
+
+When the zone has something paused or stopped that Roon can play, a **Resume** button in the header shows its title and plays it with one tap, the way tapping the art does on a blank idle screen.
 
 Which six appear:
 
@@ -234,7 +237,7 @@ The Inkplate uses these endpoints, and they're also handy for debugging or your 
 |---|---|
 | `GET /frame` | The current frame: 388,096 bytes, 1024 × 758 pixels in native panel order, two pixels per byte with the high nibble first, values 0 (black) to 7 (white). Send `If-None-Match` to get `304` when the image is unchanged. Both 200 and 304 responses carry `X-Frontlight` (0–63), `X-Layout` and `X-Rotate`, so light changes never force an e-ink refresh, plus `X-Screen` (`nowplaying`, `stations` or `idle`) and, when the back button is drawn, `X-Stations-Button` (`x,y,w,h` in upright pixels). The firmware sends `X-Features: stations` to say it can use the stations screen; with `CONTROL_TOKEN` set, that only counts alongside a valid `X-Control-Token`. |
 | `POST /control?action=…` | One of `playpause`, `next`, `previous`, `vol_up`, `vol_down`, `light_toggle`, `light_up`, `light_down`, `stations` (show the stations screen). Returns `200` if carried out, or `409` with a JSON reason if refused (for example, volume at the ceiling). Also `400` for an unknown action, `401` for a missing or wrong `X-Control-Token`, and `403` for requests from a web browser. |
-| `POST /control?action=select&x=…&y=…` | A tap on the stations screen, in upright pixels, with `If-Match` set to the ETag of the frame being shown. Returns `412` if the screen has changed since. |
+| `POST /control?action=select&x=…&y=…` | A tap on the stations screen (a station or the Resume button), in upright pixels, with `If-Match` set to the ETag of the frame being shown. Returns `412` if the screen has changed since. |
 | `GET /preview.png` | What the panel should be showing, upright. |
 | `GET /status` | JSON: zones and their states, what's shown, light level and active configuration. |
 
