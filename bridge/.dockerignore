@@ -1,5 +1,7 @@
 node_modules
 config.json
+compose.override.yaml
+compose.override.yml
 display-settings.json
 bridge.log
 preview.png

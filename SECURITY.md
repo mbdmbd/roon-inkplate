@@ -22,7 +22,9 @@ roon-inkplate is meant for a trusted home network. In summary:
 - **Commands can require a token.** Set `CONTROL_TOKEN` on the bridge and the
   same value in the Inkplate's `config.h` to stop other devices on the network
   from sending commands. The read-only endpoints (`/frame`, `/status`,
-  `/preview.png`) stay open to the LAN.
+  `/preview.png`) stay open to the LAN. The one setting a `/frame` request
+  can change (whether the panel's firmware supports the stations screen) then
+  also needs the token, and changes at most once a minute.
 - **The volume ceiling is enforced by the bridge**, not the panel, and settings
   are validated at startup: the bridge refuses to run with a value that could
   defeat it.

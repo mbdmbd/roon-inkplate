@@ -149,6 +149,8 @@ void readScreenHeaders(HTTPClient &http)
     onStations = http.header("X-Screen") == "stations";
     String b = http.header("X-Stations-Button");
     hasBackButton = b.length() && sscanf(b.c_str(), "%d,%d,%d,%d", &backBtn[0], &backBtn[1], &backBtn[2], &backBtn[3]) == 4;
+    for (int i = 0; i < 4; i++)
+        backBtn[i] = constrain(backBtn[i], 0, PANEL_W); // keep the hit test's arithmetic in range
 }
 
 // Returns true if the bridge answered (200 or 304), false on any failure.
@@ -161,6 +163,8 @@ bool pollBridge()
         return false;
     http.collectHeaders(HEADER_KEYS, HEADER_COUNT);
     http.addHeader("X-Features", "stations"); // this firmware can use the stations screen
+    if (strlen(CONTROL_TOKEN) > 0)
+        http.addHeader("X-Control-Token", CONTROL_TOKEN); // the bridge only trusts that claim with the token
     if (etag.length())
         http.addHeader("If-None-Match", etag);
 
@@ -216,7 +220,7 @@ bool pollBridge()
 
     String newTag = http.header("ETag");
     int light = readBridgeHeaders(http);
-    bool gotAll = got == FRAME_BYTES;
+    bool gotAll = got == FRAME_BYTES && newTag.length() <= 64; // the bridge's ETags are 22 characters
     if (gotAll)
         readScreenHeaders(http);
     http.end();

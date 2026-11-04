@@ -170,7 +170,9 @@ services:
 
 `/status` lists My Live Radio as the bridge sees it, any pinned stations it couldn't find, and the recent-station history.
 
-The stations screen needs firmware from v1.2.0 or later, which tells the bridge it can use it. Until you reflash, the bridge keeps the plain idle screen and draws no back button, so older firmware keeps working as before. The station screen is unlit when idle; the light comes back at its usual level when music starts.
+The stations screen needs firmware from v1.2.0 or later, which tells the bridge it can use it. Until you reflash, the bridge keeps the plain idle screen and draws no back button, so older firmware keeps working as before. If you set `CONTROL_TOKEN`, the panel's `config.h` must have the same token: the bridge only accepts the firmware's claim along with it. The station screen is unlit when idle; the light comes back at its usual level when music starts.
+
+The first time the bridge starts with `IDLE_MODE: stations`, it asks Roon for access to browsing, so Roon lists the extension as waiting again: open **Settings → Extensions** and click **Enable**.
 
 ## Tuning
 
@@ -230,7 +232,7 @@ The Inkplate uses these endpoints, and they're also handy for debugging or your 
 
 | Endpoint | Purpose |
 |---|---|
-| `GET /frame` | The current frame: 388,096 bytes, 1024 × 758 pixels in native panel order, two pixels per byte with the high nibble first, values 0 (black) to 7 (white). Send `If-None-Match` to get `304` when the image is unchanged. Both 200 and 304 responses carry `X-Frontlight` (0–63), `X-Layout` and `X-Rotate`, so light changes never force an e-ink refresh, plus `X-Screen` (`nowplaying`, `stations` or `idle`) and, when the back button is drawn, `X-Stations-Button` (`x,y,w,h` in upright pixels). The firmware sends `X-Features: stations` to say it can use the stations screen. |
+| `GET /frame` | The current frame: 388,096 bytes, 1024 × 758 pixels in native panel order, two pixels per byte with the high nibble first, values 0 (black) to 7 (white). Send `If-None-Match` to get `304` when the image is unchanged. Both 200 and 304 responses carry `X-Frontlight` (0–63), `X-Layout` and `X-Rotate`, so light changes never force an e-ink refresh, plus `X-Screen` (`nowplaying`, `stations` or `idle`) and, when the back button is drawn, `X-Stations-Button` (`x,y,w,h` in upright pixels). The firmware sends `X-Features: stations` to say it can use the stations screen; with `CONTROL_TOKEN` set, that only counts alongside a valid `X-Control-Token`. |
 | `POST /control?action=…` | One of `playpause`, `next`, `previous`, `vol_up`, `vol_down`, `light_toggle`, `light_up`, `light_down`, `stations` (show the stations screen). Returns `200` if carried out, or `409` with a JSON reason if refused (for example, volume at the ceiling). Also `400` for an unknown action, `401` for a missing or wrong `X-Control-Token`, and `403` for requests from a web browser. |
 | `POST /control?action=select&x=…&y=…` | A tap on the stations screen, in upright pixels, with `If-Match` set to the ETag of the frame being shown. Returns `412` if the screen has changed since. |
 | `GET /preview.png` | What the panel should be showing, upright. |
@@ -283,7 +285,7 @@ See [SECURITY.md](SECURITY.md) for design notes and how to report a vulnerabilit
 
 **The serial port won't open, or the upload fails.** Try another USB cable (many are charge-only), quit other apps that may hold the port, and set **Tools → Upload Speed** to 115200.
 
-**Touch commands stopped working after setting a token.** The serial monitor shows `control …: HTTP 401`. The `CONTROL_TOKEN` in `config.h` must exactly match the bridge's; reupload after changing it.
+**Touch commands stopped working after setting a token.** The serial monitor shows `control …: HTTP 401`, and the bridge logs `refused, wrong or missing X-Control-Token`. The `CONTROL_TOKEN` in `config.h` must exactly match the bridge's; reupload after changing it. A `config.h` made before tokens existed has no `CONTROL_TOKEN` line at all and still compiles, sending no token: copy the line from `config.example.h`.
 
 **The stations screen says "Waiting for Roon", or a station is missing.** Open `/status`: under `stations`, `myLiveRadio` lists what the bridge sees in Roon and `pinnedNotFound` lists `RADIO_STATIONS` names it couldn't match. Names must match exactly, including prefixes such as `SomaFM: `. If `panelSupports` is `false`, the panel is running firmware older than v1.2.0.
 

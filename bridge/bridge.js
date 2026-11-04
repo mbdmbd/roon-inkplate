@@ -624,10 +624,18 @@ function browseTask(fn) {
   browseChain = run.catch(() => {});
   return run;
 }
+// A core that stays connected but never answers would otherwise block the
+// queue (and the stations screen) until the bridge restarts.
+const BROWSE_TIMEOUT_MS = 15000;
 function browseCall(method, opts) {
   return new Promise((resolve, reject) => {
     if (!browseSvc) return reject(new Error('Roon browse service not available'));
-    browseSvc[method]({ multi_session_key: 'roon-inkplate', ...opts }, (err, body) => (err ? reject(new Error(err)) : resolve(body)));
+    const timer = setTimeout(() => reject(new Error('Roon did not answer a browse request')), BROWSE_TIMEOUT_MS);
+    browseSvc[method]({ multi_session_key: 'roon-inkplate', ...opts }, (err, body) => {
+      clearTimeout(timer);
+      if (err) reject(new Error(err));
+      else resolve(body);
+    });
   });
 }
 
@@ -821,8 +829,27 @@ function evaluate() {
   }
 }
 
-// Set from each /frame request the panel makes. Switching redraws the panel
-// with or without the stations screen and back button.
+// The panel's firmware says on each /frame poll whether it can use the stations
+// screen. /frame needs no token, so when CONTROL_TOKEN is set, only polls that
+// carry it may change this (the firmware sends it); otherwise any device on the
+// network could keep switching the screen and force e-ink refreshes. Changes
+// are also limited to one a minute.
+let lastFlagChange = -Infinity;
+let warnedPanelToken = false;
+function notePanelPoll(supported, authorised) {
+  if (!authorised) {
+    if (supported && !warnedPanelToken) {
+      warnedPanelToken = true;
+      log('the panel sent no valid X-Control-Token, so its touch commands will be refused: set CONTROL_TOKEN in its config.h to match');
+    }
+    return;
+  }
+  if (supported === clientStations || Date.now() - lastFlagChange < 60 * 1000) return;
+  lastFlagChange = Date.now();
+  setClientStations(supported);
+}
+
+// Switching redraws the panel with or without the stations screen and back button.
 function setClientStations(supported) {
   if (supported === clientStations) return;
   clientStations = supported;
@@ -1100,8 +1127,8 @@ http
       if (path === '/frame') {
         // The panel's firmware says whether it can use the stations screen.
         // Other clients (curl, scripts) don't change the setting.
-        if (/\bstations\b/.test(String(req.headers['x-features'] || ''))) setClientStations(true);
-        else if (req.headers['user-agent'] === 'ESP32HTTPClient') setClientStations(false);
+        const wantsStations = /\bstations\b/.test(String(req.headers['x-features'] || ''));
+        if (wantsStations || req.headers['user-agent'] === 'ESP32HTTPClient') notePanelPoll(wantsStations, tokenOk(req));
         const meta = {
           ETag: current.etag,
           'X-Frontlight': String(effectiveLight()),
